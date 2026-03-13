@@ -27,13 +27,25 @@ Agent-driven, autonomous exploratory data analysis. Upload a dataset, the system
 
 ## How It Works
 
-1. **Upload** — User uploads a CSV via the drag-and-drop UI
-2. **Profile** — Backend computes statistics, detects column roles, and builds a data profile
-3. **Classify** — LLM refines column roles using semantic understanding
-4. **Recommend** — Deterministic engine generates chart candidates scored by relevance
-5. **Build** — Selected plans are rendered into chart specs with pre-aggregated data
-6. **Narrate** — LLM generates explanations and insights for each visualization
-7. **Stream** — Results are streamed to the frontend via SSE as each step completes
+All results stream to the frontend in real time via SSE as each step completes.
+
+### Initial EDA Pipeline
+
+1. **Upload** — CSV is parsed, stored in-memory, and bound to the session
+2. **Profile** — Statistics computed per column: nulls, cardinality, distribution shape, value ranges
+3. **Classify** — LLM refines column roles (temporal, geographic, measure, categorical, identifier) using semantic understanding
+4. **Summary** — A dataset overview card is built and streamed immediately
+5. **Intent inference** — LLM inspects the full profile and derives a ranked list of analysis intents (e.g. "compare revenue by region over time"), each with relevant fields and priority
+6. **Intent views** — For each intent: candidates are generated, scored, deduplicated against prior views, validated, built into chart specs with pre-aggregated data, then narrated by the LLM
+
+### Follow-Up Query Pipeline
+
+When the user submits a natural language query, a separate agent-driven flow runs:
+
+1. **Query planning** — LLM agent reads the query, dataset profile, and prior analysis context, then selects up to 2 analysis tools from a library of 30+ (regression, segmentation, cohort analysis, time-series tests, SHAP, causal inference, feature engineering diagnostics, etc.)
+2. **Tool execution** — Each selected tool builds a `ViewPlan` from the profile and query data
+3. **Validate → Build → Narrate** — Same pipeline as above: plans are validated (with deterministic fallback on failure), chart specs are built, and the LLM narrates findings
+4. **Stream** — Results are appended to the existing report and streamed to the frontend
 
 ## Quickstart
 
@@ -88,10 +100,33 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000
 ```
 backend/
   main.py                  # FastAPI entry point
-  app/                     # LLM integration (chat, loader, models, prompts)
-  core/                    # Domain models, in-memory storage, utilities
-  server/                  # API routes, SSE streaming, orchestrator
-  skills/                  # Analysis pipeline modules
+  app/
+    llm.py                 # LLM chat wrapper
+    llm_loader.py          # Multi-provider LLM factory (Groq, OpenAI, NVIDIA)
+    nlq_llm.py             # Natural language query LLM helpers
+    models.py              # LLM request/response models
+    prompts.py             # Prompt templates
+    session_store.py       # Per-session state management
+  core/
+    models.py              # Pydantic domain models
+    storage.py             # In-memory dataset storage
+    utils.py               # Shared utilities
+  server/
+    api.py                 # API route handlers
+    orchestrator.py        # Pipeline orchestration
+    sse.py                 # Server-Sent Events streaming
+  skills/                  # Agent skill modules (one per pipeline step)
+    profile.py             # Data profiling and column role detection
+    classify.py            # LLM-based column classification
+    intent.py              # User intent detection
+    target.py              # Column targeting from intent
+    recommend.py           # Chart recommendation engine
+    build_view.py          # Chart spec and data aggregation
+    narrate.py             # LLM-generated chart narration
+    query_planner.py       # NLQ → analysis plan via tool-calling agent
+    query_tools.py         # Tools available to the query planning agent
+    validate.py            # Chart spec validation
+    summary.py             # Report summary generation
   test_llm_features.py     # Test suite
 
 frontend/
