@@ -67,6 +67,7 @@ export type ViewResult = {
   spec: ChartSpec;
   data_inline: Record<string, any>[];
   explanation: string;
+  fallback_repaired?: boolean; // true when plan was invalid and deterministic fallback was applied
   created_at: string;
 };
 

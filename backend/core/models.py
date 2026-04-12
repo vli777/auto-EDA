@@ -121,6 +121,7 @@ class ViewResult(BaseModel):
     spec: ChartSpec
     data_inline: List[Dict[str, Any]] = Field(default_factory=list)
     explanation: str = ""
+    fallback_repaired: bool = False   # True when plan was invalid and deterministic fallback was applied
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
 
@@ -174,6 +175,33 @@ class EDAReport(BaseModel):
     steps: List[StepResult] = Field(default_factory=list)
     views: List[ViewResult] = Field(default_factory=list)
     timeline: List[DecisionRecord] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Target analysis models (used by skills/target.py and skills/query_tools.py)
+# ---------------------------------------------------------------------------
+
+class TargetSpec(BaseModel):
+    column: Optional[str] = None
+    task_type: str = "unknown"          # regression | classification | ranking | unknown
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class TargetAssociation(BaseModel):
+    feature: str
+    metric: str                          # cramers_v | eta_squared | corr_spearman | missingness_*
+    score: float = 0.0
+    direction: Optional[str] = None     # positive | negative
+    details: Optional[Dict[str, Any]] = None
+
+
+class TargetInsights(BaseModel):
+    target: TargetSpec
+    distribution: Dict[str, Any] = Field(default_factory=dict)
+    associations: List["TargetAssociation"] = Field(default_factory=list)
+    missingness: List["TargetAssociation"] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
