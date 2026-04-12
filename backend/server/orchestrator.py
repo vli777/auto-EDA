@@ -92,6 +92,31 @@ def _build_llm_context(report: EDAReport) -> dict:
         "table": report.table_name,
     }
 
+def _validate_plan_with_fallback(
+    plan: ViewPlan, profile: DataProfile
+) -> tuple[ViewPlan | None, bool, List[str]]:
+    """
+    Validate a plan; attempt deterministic repair if invalid.
+
+    Returns (resolved_plan_or_None, was_repaired, all_warnings).
+    None means both the original and the fallback were invalid — caller should skip.
+    """
+    warnings: List[str] = []
+    is_valid, w = validate_plan(plan, profile)
+    warnings.extend(w)
+    if is_valid:
+        return plan, False, warnings
+
+    logger.warning("  Plan invalid: %s — attempting fallback", w)
+    repaired = deterministic_fallback(plan, profile)
+    is_valid, w = validate_plan(repaired, profile)
+    warnings.extend(w)
+    if not is_valid:
+        logger.warning("  Fallback also invalid, skipping")
+        return None, True, warnings
+    return repaired, True, warnings
+
+
 def run_eda_sync(
     df: pd.DataFrame,
     table_name: str,
@@ -184,7 +209,8 @@ def run_eda_sync(
                 continue
             for idx, intent in enumerate(intent_queue, start=1):
                 intent_payload = [{"title": intent["title"], "fields": intent["fields"]}]
-                step_budget = min(STEP_BUDGET, budget - total_views)
+                remaining_intents = len(intent_queue) - idx + 1
+                step_budget = min(STEP_BUDGET, max(1, (budget - total_views) // remaining_intents))
                 if step_budget <= 0:
                     break
 
@@ -208,35 +234,29 @@ def run_eda_sync(
                 step_view_results: List[ViewResult] = []
 
                 for plan in selected:
-                    is_valid, plan_warnings = validate_plan(plan, profile)
+                    resolved_plan, was_repaired, plan_warnings = _validate_plan_with_fallback(plan, profile)
                     step_warnings.extend(plan_warnings)
-
-                    if not is_valid:
-                        logger.warning("  Plan invalid: %s — attempting fallback", plan_warnings)
-                        plan = deterministic_fallback(plan, profile)
-                        is_valid, plan_warnings = validate_plan(plan, profile)
-                        if not is_valid:
-                            logger.warning("  Fallback also invalid, skipping: %s", plan_warnings)
-                            continue
+                    if resolved_plan is None:
+                        continue
 
                     try:
-                        view = build_view(plan, df)
+                        view = build_view(resolved_plan, df)
                     except Exception as e:
-                        logger.warning("  Build failed for '%s': %s", plan.intent, e)
+                        logger.warning("  Build failed for '%s': %s", resolved_plan.intent, e)
                         step_warnings.append(f"Build failed: {e}")
                         continue
 
                     view_valid, view_warnings = validate_view(view)
                     step_warnings.extend(view_warnings)
-
                     if not view_valid:
                         logger.warning("  View invalid: %s", view_warnings)
                         continue
 
+                    view.fallback_repaired = was_repaired
                     append_view(report.run_id, view)
                     step_views.append(view.id)
                     step_view_results.append(view)
-                    views_done.append(plan)
+                    views_done.append(resolved_plan)
                     all_view_results.append(view)
                     total_views += 1
 
@@ -280,20 +300,15 @@ def run_eda_sync(
             step_view_results: List[ViewResult] = []
 
             for plan in selected:
-                is_valid, plan_warnings = validate_plan(plan, profile)
+                resolved_plan, was_repaired, plan_warnings = _validate_plan_with_fallback(plan, profile)
                 step_warnings.extend(plan_warnings)
-                if not is_valid:
-                    logger.warning("  Plan invalid: %s — attempting fallback", plan_warnings)
-                    plan = deterministic_fallback(plan, profile)
-                    is_valid, plan_warnings = validate_plan(plan, profile)
-                    if not is_valid:
-                        logger.warning("  Fallback also invalid, skipping: %s", plan_warnings)
-                        continue
+                if resolved_plan is None:
+                    continue
 
                 try:
-                    view = build_view(plan, df)
+                    view = build_view(resolved_plan, df)
                 except Exception as e:
-                    logger.warning("  Build failed for '%s': %s", plan.intent, e)
+                    logger.warning("  Build failed for '%s': %s", resolved_plan.intent, e)
                     step_warnings.append(f"Build failed: {e}")
                     continue
 
@@ -303,10 +318,11 @@ def run_eda_sync(
                     logger.warning("  View invalid: %s", view_warnings)
                     continue
 
+                view.fallback_repaired = was_repaired
                 append_view(report.run_id, view)
                 step_views.append(view.id)
                 step_view_results.append(view)
-                views_done.append(plan)
+                views_done.append(resolved_plan)
                 all_view_results.append(view)
                 total_views += 1
 
@@ -475,7 +491,8 @@ async def run_eda_async(
                 continue
             for idx, intent in enumerate(intent_queue, start=1):
                 intent_payload = [{"title": intent["title"], "fields": intent["fields"]}]
-                step_budget = min(STEP_BUDGET, budget - total_views)
+                remaining_intents = len(intent_queue) - idx + 1
+                step_budget = min(STEP_BUDGET, max(1, (budget - total_views) // remaining_intents))
                 if step_budget <= 0:
                     break
 
@@ -500,24 +517,20 @@ async def run_eda_async(
                 step_view_results: List[ViewResult] = []
 
                 for plan in selected:
-                    is_valid, plan_warnings = validate_plan(plan, profile)
+                    resolved_plan, was_repaired, plan_warnings = _validate_plan_with_fallback(plan, profile)
                     step_warnings.extend(plan_warnings)
-
-                    if not is_valid:
-                        plan = deterministic_fallback(plan, profile)
-                        is_valid, plan_warnings = validate_plan(plan, profile)
-                        if not is_valid:
-                            for w in plan_warnings:
-                                await channel.emit(EVT_WARNING, {"message": w})
-                            continue
+                    if resolved_plan is None:
+                        for w in plan_warnings:
+                            await channel.emit(EVT_WARNING, {"message": w})
+                        continue
 
                     await channel.emit(EVT_VIEW_PLANNED, {
-                        "intent": plan.intent,
-                        "chart_type": plan.chart_type.value,
+                        "intent": resolved_plan.intent,
+                        "chart_type": resolved_plan.chart_type.value,
                     })
 
                     try:
-                        view = await loop.run_in_executor(_executor, build_view, plan, df)
+                        view = await loop.run_in_executor(_executor, build_view, resolved_plan, df)
                     except Exception as e:
                         logger.warning("Build failed: %s", e)
                         await channel.emit(EVT_WARNING, {"message": f"Build failed: {e}"})
@@ -530,10 +543,11 @@ async def run_eda_async(
                             await channel.emit(EVT_WARNING, {"message": w})
                         continue
 
+                    view.fallback_repaired = was_repaired
                     append_view(report.run_id, view)
                     step_views.append(view.id)
                     step_view_results.append(view)
-                    views_done.append(plan)
+                    views_done.append(resolved_plan)
                     all_view_results.append(view)
                     total_views += 1
 
@@ -592,23 +606,20 @@ async def run_eda_async(
             step_view_results: List[ViewResult] = []
 
             for plan in selected:
-                is_valid, plan_warnings = validate_plan(plan, profile)
+                resolved_plan, was_repaired, plan_warnings = _validate_plan_with_fallback(plan, profile)
                 step_warnings.extend(plan_warnings)
-                if not is_valid:
-                    plan = deterministic_fallback(plan, profile)
-                    is_valid, plan_warnings = validate_plan(plan, profile)
-                    if not is_valid:
-                        for w in plan_warnings:
-                            await channel.emit(EVT_WARNING, {"message": w})
-                        continue
+                if resolved_plan is None:
+                    for w in plan_warnings:
+                        await channel.emit(EVT_WARNING, {"message": w})
+                    continue
 
                 await channel.emit(EVT_VIEW_PLANNED, {
-                    "intent": plan.intent,
-                    "chart_type": plan.chart_type.value,
+                    "intent": resolved_plan.intent,
+                    "chart_type": resolved_plan.chart_type.value,
                 })
 
                 try:
-                    view = await loop.run_in_executor(_executor, build_view, plan, df)
+                    view = await loop.run_in_executor(_executor, build_view, resolved_plan, df)
                 except Exception as e:
                     logger.warning("Build failed: %s", e)
                     await channel.emit(EVT_WARNING, {"message": f"Build failed: {e}"})
@@ -621,10 +632,11 @@ async def run_eda_async(
                         await channel.emit(EVT_WARNING, {"message": w})
                     continue
 
+                view.fallback_repaired = was_repaired
                 append_view(report.run_id, view)
                 step_views.append(view.id)
                 step_view_results.append(view)
-                views_done.append(plan)
+                views_done.append(resolved_plan)
                 all_view_results.append(view)
                 total_views += 1
 
