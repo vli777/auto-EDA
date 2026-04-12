@@ -14,3 +14,4 @@ yarn-error.log*
 pip-log.txt
 pip-delete-this-directory.txt
 __pycache__/
+.claude/settings.local.json
