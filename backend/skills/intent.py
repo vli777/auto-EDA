@@ -16,7 +16,7 @@ logger = logging.getLogger("uvicorn.error")
 _llm_warn_logged = False
 
 _INTENT_SYSTEM = """You are an expert data analyst.
-Given a dataset profile, propose a prioritized list of analysis intents that would surface useful insights.
+Given a dataset profile, propose a prioritized list of analysis intents that would surface genuinely useful insights.
 
 Return JSON:
 {
@@ -30,8 +30,14 @@ Rules:
 - Provide 4-8 intents.
 - Favor intents grounded in the actual columns and roles.
 - Use concrete language (e.g., "Trend of retail sales over time", "Top item types by transfers").
-- If you detect a likely target, include it as one intent but not the only one.
+- If you detect a likely target variable, include it as one intent but not the only one.
 - Return ONLY valid JSON. No prose, no code fences.
+
+CRITICAL — avoid trivially obvious intents:
+- Do NOT propose correlations between fields that are definitionally related (e.g., net_worth vs assets, total_revenue vs sales, age vs birth_year, price vs cost_plus_margin).
+- Do NOT propose "X and Y are correlated" when any domain expert would already know this.
+- Instead, focus on: unexpected distributions, outliers, breakdowns by segment, time trends, fields where the data might surprise the analyst.
+- Ask yourself: "Would a domain expert already know this relationship is true?" If yes, skip it and find something more interesting.
 """
 
 _SELECT_SYSTEM = """You are an expert data analyst.
